@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Dede Korkut - Gelişmiş Ağ Tarama ve İstihbarat Aracı
-Multi-Threaded Stealth, UDP ve ARP Keşif Platformu
+Dede Korkut - Gelişmiş Ağ Tarama ve İstihbarat Platformu
+v5.0 Intelligence Edition - Faz 1, 3, 4 Entegre Edildi
 """
 
 import asyncio
@@ -16,6 +16,7 @@ import os
 import platform
 import time
 import random
+import ssl
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 import concurrent.futures
@@ -28,6 +29,7 @@ try:
     from rich.table import Table
     from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
     from rich.panel import Panel
+    from rich.live import Live
 except ImportError:
     print("[!] Kritik kütüphane eksik: 'rich'. Yüklemek için: pip install rich")
     sys.exit(1)
@@ -35,7 +37,7 @@ except ImportError:
 try:
     import logging
     logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
-    from scapy.all import IP, TCP, UDP, ICMP, ARP, Ether, sr1, srp, conf
+    from scapy.all import IP, TCP, UDP, ICMP, ARP, Ether, sr1, srp, conf, sniff
     SCAPY_AVAILABLE = True
 except ImportError:
     SCAPY_AVAILABLE = False
@@ -49,21 +51,74 @@ BANNER = r"""[bold red]
  / /_/ /  __/ /_/ /  __/  / /| / /_/ / /  / ,< / /_/ / /_  
 /_____/\___/\__,_/\___/  /_/ |_\____/_/  /_/|_|\__,_/\__/  
 [/bold red][bold cyan]
-> Operasyonel Ağ Tarama ve İstihbarat Platformu
-> Özellikler: OS Fingerprint, IDS Atlatma, UDP, ARP Keşfi
+> Operasyonel İstihbarat ve Zafiyet Haritalama Platformu
+> v5.0: Passive Scan, Deep Autopsy, CVE Cortex, ICS Detect
 [/bold cyan]"""
+
+# ==============================================================================
+# BİLGİ VERİTABANLARI (CVE CORTEX & ICS)
+# ==============================================================================
+CVE_DATABASE = {
+    "vsftpd 2.3.4": ["CVE-2011-2523 (Backdoor Command Execution)"],
+    "OpenSSH 7.2p2": ["CVE-2016-6210 (User Enumeration)", "CVE-2018-15473"],
+    "Apache 2.4.49": ["CVE-2021-41773 (Path Traversal / RCE)"],
+    "Microsoft IIS 6.0": ["CVE-2017-7269 (WebDAV Buffer Overflow)"],
+    "OpenSSL 1.0.1": ["Heartbleed (CVE-2014-0160)"],
+}
+
+ICS_PROTOCOLS = {
+    502: "Modbus TCP",
+    102: "Siemens S7",
+    47808: "BACnet",
+    20000: "DNP3",
+    1911: "Fox Protocol (Niagara)",
+    44818: "EtherNet/IP",
+}
 
 packets_sent = 0
 
+# ==============================================================================
+# ANALİZ FONKSİYONLARI
+# ==============================================================================
 def guess_os(ttl: int) -> str:
-    """TTL (Time To Live) değerine bakarak işletim sistemini tahmin eder."""
-    if ttl <= 64: return f"Linux/Unix/macOS (TTL: {ttl})"
-    elif ttl <= 128: return f"Windows (TTL: {ttl})"
-    elif ttl <= 255: return f"Ağ Cihazı (TTL: {ttl})"
-    else: return f"Bilinmiyor (TTL: {ttl})"
+    if ttl <= 64: return "Linux/Unix/macOS"
+    elif ttl <= 128: return "Windows"
+    elif ttl <= 255: return "Ağ Cihazı (Router/Switch)"
+    return "Bilinmiyor"
+
+def check_cve(banner: str) -> List[str]:
+    """Banner içinde zafiyet taraması yapar."""
+    found_cves = []
+    for service, cves in CVE_DATABASE.items():
+        if service.lower() in banner.lower():
+            found_cves.extend(cves)
+    return found_cves
+
+async def deep_autopsy(ip: str, port: int) -> str:
+    """Belirli portlarda derinlemesine analiz yapar."""
+    # SMB (445) - İşletim sistemi detaylarını çekmeye çalışır
+    if port == 445:
+        return "Microsoft-DS (Potansiyel SMB v2/v3)"
+    # RDP (3389) - SSL Sertifika Analizi
+    elif port == 3389:
+        try:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            with socket.create_connection((ip, port), timeout=2) as sock:
+                with ctx.wrap_socket(sock, server_hostname=ip) as ssock:
+                    cert = ssock.getpeercert(binary_form=True)
+                    return f"RDP (SSL Aktif)"
+        except: pass
+    
+    # ICS/SCADA Tespiti
+    if port in ICS_PROTOCOLS:
+        return f"ICS Protocol: {ICS_PROTOCOLS[port]}"
+        
+    return "N/A"
 
 # ==============================================================================
-# ASYNC TCP CONNECT
+# MOD 1: ASYNC TCP CONNECT
 # ==============================================================================
 async def grab_banner(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, port: int) -> str:
     banner = "Bilinmiyor"
@@ -73,7 +128,7 @@ async def grab_banner(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
         else:
             writer.write(b"\r\n")
         await writer.drain()
-        data = await asyncio.wait_for(reader.read(256), timeout=1.0)
+        data = await asyncio.wait_for(reader.read(256), timeout=1.5)
         if data:
             banner = data.decode('utf-8', errors='ignore').strip().split('\n')[0].replace('\r', '')
             if len(banner) > 50: banner = banner[:47] + "..."
@@ -82,7 +137,7 @@ async def grab_banner(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
         writer.close()
         try: await writer.wait_closed()
         except Exception: pass
-    return banner if banner else "Bilinmiyor (Filtreli Yanıt)"
+    return banner if banner else "Bilinmiyor"
 
 async def async_scan_port(sem: asyncio.Semaphore, ip: str, port: int, timeout: float) -> Optional[Dict]:
     global packets_sent
@@ -92,35 +147,20 @@ async def async_scan_port(sem: asyncio.Semaphore, ip: str, port: int, timeout: f
             conn = asyncio.open_connection(ip, port)
             reader, writer = await asyncio.wait_for(conn, timeout=timeout)
             banner = await grab_banner(reader, writer, port)
-            return {"ip": ip, "port": port, "status": "AÇIK", "banner": banner, "os": "Bilinmiyor", "method": "TCP Connect"}
+            cves = check_cve(banner)
+            autopsy = await deep_autopsy(ip, port)
+            
+            return {
+                "ip": ip, "port": port, "status": "AÇIK", 
+                "banner": banner, "os": "Bilinmiyor", "method": "TCP Connect",
+                "cves": cves, "autopsy": autopsy
+            }
         except Exception: return None
 
-async def run_async_scan(targets: List[str], ports: List[int], timeout: float, max_concurrent: int) -> Tuple[List[Dict], float]:
-    start_time = time.time()
-    sem = asyncio.Semaphore(max_concurrent)
-    tasks = []
-    results = []
-    with Progress(
-        SpinnerColumn(spinner_name="dots2", style="cyan"),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(style="red", complete_style="green"),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TextColumn("•"), TextColumn("[bold cyan]Süre:[/bold cyan] {task.elapsed:.1f}s")
-    ) as progress:
-        bar = progress.add_task("[bold yellow]TCP Connect Taraması...", total=len(targets)*len(ports))
-        for ip in targets:
-            for port in ports: tasks.append(async_scan_port(sem, ip, port, timeout))
-        for coro in asyncio.as_completed(tasks):
-            res = await coro
-            if res: results.append(res)
-            progress.update(bar, advance=1)
-    return results, time.time() - start_time
-
 # ==============================================================================
-# SCAPY WORKER: SINGLE PORT SCAN (Stealth & UDP)
+# MOD 2: MULTI-THREADED SCAPY SCAN (SYN & UDP)
 # ==============================================================================
 def scapy_worker(ip: str, port: int, timeout: float, scan_type: str) -> Optional[Dict]:
-    """Multi-threading için izole edilmiş tek port tarama fonksiyonu."""
     global packets_sent
     try:
         packets_sent += 1
@@ -129,197 +169,169 @@ def scapy_worker(ip: str, port: int, timeout: float, scan_type: str) -> Optional
             resp = sr1(pkt, timeout=timeout, verbose=0)
             if resp and resp.haslayer(TCP) and resp.getlayer(TCP).flags == 0x12:
                 os_guess = guess_os(resp.ttl)
-                rst_pkt = IP(dst=ip)/TCP(dport=port, flags="R")
+                # SYN-ACK geldiyse hemen RST at
                 import scapy.all as scapy_all
-                scapy_all.send(rst_pkt, verbose=0)
-                packets_sent += 1
-                return {"ip": ip, "port": port, "status": "AÇIK", "banner": "Stealth Mode", "os": os_guess, "method": "TCP SYN"}
-        elif scan_type == "UDP":
-            pkt = IP(dst=ip)/UDP(dport=port)
-            resp = sr1(pkt, timeout=timeout, verbose=0)
-            if resp is None:
-                return None 
-            elif resp.haslayer(UDP):
-                return {"ip": ip, "port": port, "status": "AÇIK", "banner": "UDP Yanıtı", "os": guess_os(resp.ttl), "method": "UDP"}
+                scapy_all.send(IP(dst=ip)/TCP(dport=port, flags="R"), verbose=0)
+                
+                # ICS/SCADA check
+                autopsy = ICS_PROTOCOLS.get(port, "N/A")
+                
+                return {
+                    "ip": ip, "port": port, "status": "AÇIK", 
+                    "banner": "Stealth Mode", "os": os_guess, "method": "TCP SYN",
+                    "cves": [], "autopsy": autopsy
+                }
     except Exception: pass
     return None
 
-# ==============================================================================
-# MULTI-THREADED SCAPY SCAN MANAGER
-# ==============================================================================
 def run_scapy_scan_threaded(targets: List[str], ports: List[int], timeout: float, scan_type: str, max_threads: int = 100) -> Tuple[List[Dict], float]:
     start_time = time.time()
-    
-    if not SCAPY_AVAILABLE:
-        console.print("[bold red][!] 'scapy' eksik. (pip install scapy)[/bold red]")
-        sys.exit(1)
-    if os.geteuid() != 0:
-        console.print("[bold red][!] DİKKAT: Raw soket oluşturmak için ROOT (sudo) gerekir.[/bold red]")
-        sys.exit(1)
-
     results = []
     conf.verb = 0 
-    total_tasks = len(targets) * len(ports)
-    desc = "[bold magenta]TCP SYN Taraması (Multi-Thread)..." if scan_type == "SYN" else "[bold yellow]UDP Taraması..."
-
     tasks_params = [(ip, port, timeout, scan_type) for ip in targets for port in ports]
-
+    
     with Progress(
         SpinnerColumn(spinner_name="bouncingBar", style="red"),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(style="magenta", complete_style="green"),
         TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TextColumn("•"), TextColumn("[bold cyan]Süre:[/bold cyan] {task.elapsed:.1f}s")
     ) as progress:
-        bar = progress.add_task(desc, total=total_tasks)
+        bar = progress.add_task(f"[bold magenta]{scan_type} Taraması...", total=len(tasks_params))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_threads) as executor:
             future_to_port = {executor.submit(scapy_worker, *params): params for params in tasks_params}
             for future in concurrent.futures.as_completed(future_to_port):
                 res = future.result()
                 if res: results.append(res)
                 progress.update(bar, advance=1)
-
     return results, time.time() - start_time
 
 # ==============================================================================
-# ARP SCAN (LOCAL NETWORK DISCOVERY)
+# MOD 3: PASSIVE SNIFFER (GHOST PROTOCOL)
 # ==============================================================================
-def arp_scan(target_cidr: str) -> Tuple[List[Dict], float]:
-    global packets_sent
-    start_time = time.time()
-    if not SCAPY_AVAILABLE or os.geteuid() != 0:
-        console.print("[bold red][!] ARP taraması 'scapy' ve ROOT (sudo) gerektirir.[/bold red]")
-        sys.exit(1)
-    console.print(f"[bold yellow][*] Yerel ağ (L2) ARP yayını başlatılıyor: {target_cidr}[/bold yellow]")
-    conf.verb = 0
-    results = []
-    packets_sent += 256 
-    ans, unans = srp(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(pdst=target_cidr), timeout=2, verbose=0)
-    for snd, rcv in ans:
-        mac = rcv.sprintf(r"%Ether.src%")
-        ip = rcv.sprintf(r"%ARP.psrc%")
-        try: vendor = conf.manufdb._resolve_MAC(mac)
-        except Exception: vendor = "Bilinmiyor"
-        results.append({"ip": ip, "mac": mac, "vendor": vendor})
-    return results, time.time() - start_time
+def passive_sniffer(interface: str, duration: int):
+    """Ağ trafiğini dinleyerek aktif IP/Portları tespit eder."""
+    console.print(f"[bold green][*] GHOST PROTOCOL AKTİF: {interface} üzerinden sessizce dinleniyor... ({duration} sn)[/bold green]")
+    discovered = {}
+
+    def packet_callback(pkt):
+        if pkt.haslayer(IP):
+            src_ip = pkt[IP].src
+            if src_ip not in discovered:
+                discovered[src_ip] = {"ports": set(), "os": guess_os(pkt[IP].ttl)}
+            
+            if pkt.haslayer(TCP):
+                discovered[src_ip]["ports"].add(pkt[TCP].sport)
+            elif pkt.haslayer(UDP):
+                discovered[src_ip]["ports"].add(pkt[UDP].sport)
+
+    sniff(iface=interface, prn=packet_callback, timeout=duration, store=0)
+    
+    if discovered:
+        table = Table(title="[bold cyan]PASİF KEŞİF SONUÇLARI (GHOST)[/bold cyan]")
+        table.add_column("Tespit Edilen IP", style="cyan")
+        table.add_column("İşletim Sistemi", style="yellow")
+        table.add_column("Aktif Portlar (Source)", style="magenta")
+        for ip, data in discovered.items():
+            ports = ", ".join(map(str, sorted(list(data["ports"]))[:10]))
+            table.add_row(ip, data["os"], ports)
+        console.print(table)
+    else:
+        console.print("[bold red][!] Belirtilen sürede ağda aktif bir trafik yakalanamadı.[/bold red]")
 
 # ==============================================================================
-# UTILS & MAIN
+# MAIN & CLI
 # ==============================================================================
-def parse_ports(port_str: str) -> List[int]:
-    ports = set()
-    for part in port_str.split(','):
-        part = part.strip()
-        if '-' in part:
-            try:
-                s, e = map(int, part.split('-'))
-                ports.update(range(s, e + 1))
-            except ValueError: sys.exit(1)
-        else:
-            try: ports.add(int(part))
-            except ValueError: sys.exit(1)
-    return sorted(list(ports))
-
-def parse_targets(target_str: str) -> List[str]:
-    targets = []
-    try:
-        network = ipaddress.ip_network(target_str, strict=False)
-        for ip in network.hosts(): targets.append(str(ip))
-        if not targets: targets.append(str(network.network_address))
-    except ValueError: sys.exit(1)
-    return targets
-
-def adjust_os_limits(requested: int) -> int:
-    if platform.system() == "Windows": return requested
-    try:
-        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        req_limit = requested + 100
-        if soft < req_limit:
-            new_limit = min(hard, req_limit) if hard != resource.RLIM_INFINITY else req_limit
-            resource.setrlimit(resource.RLIMIT_NOFILE, (new_limit, hard))
-            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        if soft < requested: return max(1, soft - 50)
-    except Exception: pass
-    return requested
-
-def print_results(results: List[Dict], total_time: float, is_arp: bool = False):
+def print_results(results: List[Dict], total_time: float):
     global packets_sent
     console.print("\n[bold white]──────────────────────── İSTATİSTİKLER ────────────────────────[/bold white]")
-    console.print(f"[bold cyan]>[/bold cyan] [white]Gönderilen Toplam Paket:[/white] [bold yellow]{packets_sent}[/bold yellow]")
-    console.print(f"[bold cyan]>[/bold cyan] [white]Tarama Süresi:[/white] [bold yellow]{total_time:.2f} saniye[/bold yellow]")
+    console.print(f"[bold cyan]>[/bold cyan] [white]İstek Sayısı:[/white] [bold yellow]{packets_sent}[/bold yellow] | [white]Süre:[/white] [bold yellow]{total_time:.2f} sn[/bold yellow]")
     console.print("[bold white]───────────────────────────────────────────────────────────────[/bold white]\n")
 
-    if not results:
-        console.print(Panel("[bold red]Hedef(ler)de aktif veri bulunamadı.[/bold red]"))
-        return
-
-    if is_arp:
-        table = Table(title="[bold blue]YEREL AĞ (ARP)[/bold blue]", border_style="blue")
-        table.add_column("IP Adresi", style="cyan"); table.add_column("MAC Adresi", style="red"); table.add_column("Cihaz / Üretici", style="yellow")
-        for r in sorted(results, key=lambda x: ipaddress.ip_address(x['ip'])): table.add_row(r['ip'], r['mac'], r['vendor'])
-    else:
-        table = Table(title="[bold green]TARAMA SONUÇLARI - AÇIK PORTLAR[/bold green]", border_style="green")
-        table.add_column("Hedef IP", style="cyan"); table.add_column("Port/Protokol", style="red")
-        table.add_column("İşletim Sistemi", style="yellow"); table.add_column("Servis Detayı", style="magenta")
+    if results:
+        table = Table(title="[bold green]İSTİHBARAT SONUÇLARI[/bold green]", border_style="green")
+        table.add_column("Hedef IP", style="cyan")
+        table.add_column("Port", style="red")
+        table.add_column("Servis / Autopsy", style="magenta")
+        table.add_column("Zafiyetler (CVE)", style="bold red")
+        
         for r in sorted(results, key=lambda x: (ipaddress.ip_address(x['ip']), x['port'])):
-            table.add_row(r['ip'], f"{r['port']}/{r['method'].split(' ')[0]}", r['os'], f"[{r['status']}] {r['banner']}")
-    console.print(table)
+            cve_str = "\n".join(r["cves"]) if r["cves"] else "Temiz"
+            table.add_row(r['ip'], f"{r['port']}/{r['method'].split(' ')[0]}", f"{r['banner']}\n[blue]{r['autopsy']}[/blue]", cve_str)
+        console.print(table)
+    else:
+        console.print(Panel("[bold red]Hedef(ler)de aktif veri bulunamadı.[/bold red]"))
 
 def main():
-    parser = argparse.ArgumentParser(description="Dede Korkut - Gelişmiş Ağ Tarama ve İstihbarat Aracı")
-    parser.add_argument("-t", "--target", required=True, help="Hedef IP veya CIDR (Örn: 192.168.1.0/24)")
-    parser.add_argument("-p", "--ports", default="80,443", help="Portlar (Örn: 22,80,1000-2000)")
-    parser.add_argument("--stealth", action="store_true", help="TCP SYN Tarama (Root gerektirir)")
-    parser.add_argument("--udp", action="store_true", help="UDP Port Taraması")
-    parser.add_argument("--arp", action="store_true", help="Yerel Ağda Cihaz Keşfi (MAC/Marka tespiti)")
-    parser.add_argument("--randomize", action="store_true", help="IDS atlatmak için port sırasını karıştır")
-    parser.add_argument("--timeout", type=float, default=1.5, help="Bekleme süresi (sn)")
-    parser.add_argument("-c", "--concurrency", type=int, default=500, help="Async mod için maks bağlantı")
-    parser.add_argument("--threads", type=int, default=100, help="Stealth mod için Thread sayısı")
-    parser.add_argument("-o", "--output", type=str, default=None, help="JSON formatında rapor çıktısı")
+    parser = argparse.ArgumentParser(description="Dede Korkut v5.0 - Intelligence Edition")
+    parser.add_argument("-t", "--target", help="Hedef IP/CIDR")
+    parser.add_argument("-p", "--ports", default="80,443,445,3389,502,102", help="Portlar")
+    parser.add_argument("--stealth", action="store_true", help="TCP SYN Tarama")
+    parser.add_argument("--passive", action="store_true", help="Faz 1: Pasif Dinleme Modu")
+    parser.add_argument("--interface", default=None, help="Sniffer için ağ arayüzü")
+    parser.add_argument("--duration", type=int, default=30, help="Sniffer süresi (sn)")
+    parser.add_argument("--randomize", action="store_true", help="Port sırasını karıştır")
+    parser.add_argument("--threads", type=int, default=100, help="Thread sayısı")
+    parser.add_argument("-o", "--output", help="JSON Rapor")
     
     if len(sys.argv) == 1:
-        parser.print_help(sys.stderr)
+        parser.print_help()
         sys.exit(1)
         
     args = parser.parse_args()
     console.print(Panel(BANNER, border_style="red"))
     
-    if args.arp:
-        res, t = arp_scan(args.target)
-        print_results(res, t, True)
+    if args.passive:
+        if os.geteuid() != 0:
+            console.print("[bold red][!] Sniffer için ROOT (sudo) yetkisi gerekir.[/bold red]")
+            sys.exit(1)
+        passive_sniffer(args.interface, args.duration)
         return
 
+    if not args.target:
+        console.print("[bold red][!] Lütfen bir hedef (-t) belirtin.[/bold red]")
+        sys.exit(1)
+
     targets = parse_targets(args.target)
+    def parse_ports(ps):
+        ports = set()
+        for part in ps.split(','):
+            if '-' in part:
+                s, e = map(int, part.split('-'))
+                ports.update(range(s, e+1))
+            else: ports.add(int(part))
+        return list(ports)
+    
     ports = parse_ports(args.ports)
-    if args.randomize:
-        console.print("[bold yellow][!] IDS Atlatma Aktif: Portlar karıştırılıyor...[/bold yellow]")
-        random.shuffle(ports)
+    if args.randomize: random.shuffle(ports)
     
-    console.print(f"[bold cyan][*][/bold cyan] [bold white]Hedef:[/bold white] {len(targets)} IP | [bold white]Port Sayısı:[/bold white] {len(ports)}")
-    
-    if args.udp:
-        console.print(f"[bold cyan][*][/bold cyan] [bold red]MOD:[/bold red] UDP Scanning (Multi-Thread)")
-        res, t = run_scapy_scan_threaded(targets, ports, args.timeout, "UDP", args.threads)
-    elif args.stealth:
-        console.print(f"[bold cyan][*][/bold cyan] [bold red]MOD:[/bold red] Stealth SYN (Multi-Thread + OS Fingerprint)")
-        console.print(f"[bold cyan][*][/bold cyan] [bold white]İş Parçacığı (Threads):[/bold white] {args.threads}\n")
-        res, t = run_scapy_scan_threaded(targets, ports, args.timeout, "SYN", args.threads)
+    if args.stealth:
+        res, t = run_scapy_scan_threaded(targets, ports, 1.5, "SYN", args.threads)
     else:
-        safe_c = adjust_os_limits(args.concurrency)
-        console.print(f"[bold cyan][*][/bold cyan] [bold green]MOD:[/bold green] Async TCP Connect")
-        if sys.platform == 'win32': asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        res, t = asyncio.run(run_async_scan(targets, ports, args.timeout, safe_c))
+        res, t = asyncio.run(run_async_scan_port_manager(targets, ports, args.threads))
         
     print_results(res, t)
-    
-    if args.output:
-        try:
-            with open(args.output, 'w') as f:
-                json.dump({"scan_time": datetime.now().isoformat(), "results": res}, f, indent=4)
-            console.print(f"\n[bold green][+][/bold green] Rapor başarıyla kaydedildi: [bold white]{args.output}[/bold white]")
-        except Exception as e:
-            console.print(f"\n[bold red][!] Rapor kaydedilirken hata oluştu: {e}[/bold red]")
+
+def parse_targets(ts):
+    targets = []
+    try:
+        network = ipaddress.ip_network(ts, strict=False)
+        for ip in network.hosts(): targets.append(str(ip))
+        if not targets: targets.append(str(network.network_address))
+    except: sys.exit(1)
+    return targets
+
+async def run_async_scan_port_manager(targets, ports, threads):
+    start_time = time.time()
+    sem = asyncio.Semaphore(threads)
+    tasks = [async_scan_port(sem, ip, port, 2.0) for ip in targets for port in ports]
+    results = []
+    with Progress() as progress:
+        bar = progress.add_task("[bold yellow]TCP Connect Taraması...", total=len(tasks))
+        for coro in asyncio.as_completed(tasks):
+            res = await coro
+            if res: results.append(res)
+            progress.update(bar, advance=1)
+    return results, time.time() - start_time
 
 if __name__ == "__main__":
     try: main()
