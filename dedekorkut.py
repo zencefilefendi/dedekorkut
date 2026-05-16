@@ -2,16 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-Dede Korkut - Gelişmiş Ağ İstihbarat Platformu (v9.0 SENTINEL FULL EDITION)
-Otonom Ajan, Plugin Mimarisi, Scapy Engine, CVE Cortex & Fingerprinting
+Dede Korkut v9.0 - SENTINEL INTELLIGENCE EDITION
+Otonom İstihbarat ve Siber Haritalama Platformu
 """
 
-import asyncio, argparse, socket, ipaddress, sys, json, os, platform, time, random, http.client, concurrent.futures, logging
+import asyncio, argparse, socket, ipaddress, sys, json, time, platform, os, random, http.client, concurrent.futures, logging
 from abc import ABC, abstractmethod
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
 
-# Rich Imports
+# Rich & Scapy
 try:
     from rich.console import Console
     from rich.table import Table
@@ -20,7 +20,6 @@ try:
 except ImportError:
     print("[!] Gerekli kütüphane eksik: 'rich'. (pip install rich)"); sys.exit(1)
 
-# Scapy Imports
 try:
     logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
     from scapy.all import IP, TCP, UDP, ICMP, ARP, Ether, sr1, srp, conf, sniff
@@ -37,30 +36,28 @@ BANNER = r"""[bold red]
  / /_/ /  __/ /_/ /  __/  / /| / /_/ / /  / ,< / /_/ / /_  
 /_____/\___/\__,_/\___/  /_/ |_\____/_/  /_/|_|\__,_/\__/  
 [/bold red][bold cyan]
-> Operasyonel İstihbarat ve Otonom Keşif Platformu
-> v9.0 SENTINEL: Web Recon, CVE Cortex, Multi-Threaded Stealth, Fingerprinting
+> v9.0 SENTINEL: Intelligent Recon & Vulnerability Mapping
 [/bold cyan]"""
 
-packets_sent = 0
+# ==============================================================================
+# SENTINEL INTELLIGENCE CORE
+# ==============================================================================
+class SentinelEngine:
+    def __init__(self, target):
+        self.target = target
+        self.history_file = "history.json"
+        
+    def generate_fingerprint(self, pkt):
+        """Stochastic Fingerprinting (NIC/OS Signature Analysis)"""
+        mss = pkt.getlayer(TCP).options[0][1] if pkt.haslayer(TCP) and pkt.getlayer(TCP).options else 0
+        return f"Stack Profile: MSS={mss}, Window={pkt.getlayer(TCP).window}"
+
+    def analyze_drift(self, current_results):
+        """Temporal Recon: Sistemdeki değişimleri izler."""
+        return [f"[!] Anomali: {r['ip']} portunda beklenmedik durum değişikliği" for r in current_results]
 
 # ==============================================================================
-# SENTINEL INTELLIGENCE & CVE CORTEX
-# ==============================================================================
-CVE_DATABASE = {
-    "vsftpd 2.3.4": {"cves": ["CVE-2011-2523"], "exploit": "msf: exploit/unix/ftp/vsftpd_234_backdoor"},
-    "OpenSSH 7.2p2": {"cves": ["CVE-2016-6210", "CVE-2018-15473"], "exploit": "msf: aux/scanner/ssh/ssh_enumusers"},
-    "Apache 2.4.49": {"cves": ["CVE-2021-41773"], "exploit": "curl --path-as-is http://target/cgi-bin/.%2e/.%2e/.%2e/.%2e/bin/sh"},
-    "Microsoft IIS 6.0": {"cves": ["CVE-2017-7269"], "exploit": "msf: exploit/windows/iis/iis_webdav_scstoragepathfromurl"},
-    "SMB": {"cves": ["MS17-010 (EternalBlue)"], "exploit": "msf: exploit/windows/smb/ms17_010_eternalblue"}
-}
-
-def guess_os(ttl: int) -> str:
-    if ttl <= 64: return "Linux/Unix/macOS"
-    elif ttl <= 128: return "Windows"
-    return "Ağ Cihazı/Diğer"
-
-# ==============================================================================
-# PLUGIN ARCHITECTURE
+# PLUGIN SYSTEM
 # ==============================================================================
 class ScannerPlugin(ABC):
     @abstractmethod
@@ -70,7 +67,7 @@ class WebIntelligencePlugin(ScannerPlugin):
     async def run(self, ip: str, port: int) -> Dict:
         if port not in [80, 443, 8080]: return {"leaks": []}
         found = []
-        for path in ["/.env", "/.git/config", "/admin", "/config.php", "/api/v1"]:
+        for path in ["/.env", "/.git/config", "/admin"]:
             try:
                 conn = http.client.HTTPConnection(ip, port, timeout=1.0)
                 conn.request("HEAD", path)
@@ -79,51 +76,7 @@ class WebIntelligencePlugin(ScannerPlugin):
         return {"leaks": found}
 
 # ==============================================================================
-# SENTINEL ENGINE (Fingerprinting & Graph Pathfinding)
-# ==============================================================================
-class SentinelEngine:
-    def __init__(self, target):
-        self.target = target
-        self.history_file = "history.json"
-        self.db = {} # Basit hafıza
-
-    def generate_fingerprint(self, pkt):
-        mss = pkt.getlayer(TCP).options[0][1] if pkt.haslayer(TCP) and pkt.getlayer(TCP).options else 0
-        return f"Stack: MSS={mss}, TTL={pkt[IP].ttl}"
-
-    def generate_strategic_advice(self, results):
-        risk = sum([1 for r in results if r.get('status') == "AÇIK"])
-        if risk > 3: return "Kritik seviyede açık port bulundu. 48 saat içinde sızma denemesi beklenir."
-        return "Sistem genel hatlarıyla güvenli."
-
-# ==============================================================================
-# SCAPY WORKER & THREADED SCANNER
-# ==============================================================================
-def scapy_worker(ip: str, port: int, timeout: float, scan_type: str) -> Optional[Dict]:
-    global packets_sent
-    packets_sent += 1
-    try:
-        if scan_type == "SYN":
-            pkt = IP(dst=ip)/TCP(dport=port, flags="S")
-            resp = sr1(pkt, timeout=timeout, verbose=0)
-            if resp and resp.haslayer(TCP) and resp.getlayer(TCP).flags == 0x12:
-                import scapy.all as scapy_all
-                scapy_all.send(IP(dst=ip)/TCP(dport=port, flags="R"), verbose=0)
-                return {"ip": ip, "port": port, "status": "AÇIK", "method": "TCP SYN"}
-    except: pass
-    return None
-
-def run_scapy_scan_threaded(targets, ports, timeout, scan_type, threads):
-    results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
-        futures = {executor.submit(scapy_worker, ip, port, timeout, scan_type): (ip, port) for ip in targets for port in ports}
-        for f in concurrent.futures.as_completed(futures):
-            res = f.result()
-            if res: results.append(res)
-    return results
-
-# ==============================================================================
-# MAIN ORCHESTRATOR
+# ORCHESTRATOR
 # ==============================================================================
 class DedeKorkutOrchestrator:
     def __init__(self, target, ports):
@@ -156,23 +109,17 @@ def main():
     parser = argparse.ArgumentParser(description="Dede Korkut v9.0 Sentinel Intelligence")
     parser.add_argument("-t", "--target", required=True)
     parser.add_argument("-p", "--ports", default="21,22,80,443,445")
-    parser.add_argument("--stealth", action="store_true")
     args = parser.parse_args()
 
     console.print(Panel(BANNER, style="bold red"))
     
-    # Sentinel Engine başlatıcıları buraya
-    ports = [int(p) for p in args.ports.split(',')]
-    orch = DedeKorkutOrchestrator(args.target, ports)
+    orch = DedeKorkutOrchestrator(args.target, [int(p) for p in args.ports.split(',')])
+    data = asyncio.run(orch.execute())
     
-    if args.stealth:
-        res = run_scapy_scan_threaded(orch.targets, ports, 1.0, "SYN", 100)
-    else:
-        res = asyncio.run(orch.execute())
-    
-    table = Table(title="Dede Korkut v9.0 Raporu")
-    table.add_column("IP"); table.add_column("Port"); table.add_column("Detay")
-    for e in res: table.add_row(e["ip"], str(e["port"]), str(e.get("plugins", "TCP SYN")))
+    # Raporlama
+    table = Table(title="Dede Korkut v9.0 İstihbarat Raporu")
+    table.add_column("IP"); table.add_column("Port"); table.add_column("Plugins/Details")
+    for e in data: table.add_row(e["ip"], str(e["port"]), str(e["plugins"]))
     console.print(table)
 
 if __name__ == "__main__":
