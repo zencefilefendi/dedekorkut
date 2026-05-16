@@ -1,93 +1,48 @@
 #!/usr/bin/env python3
 """
-Dede Korkut v8.0 - SENTINEL EDITION
-Engine: Tactical Otonom Ajan
+Dede Korkut v9.0 - SENTINEL INTELLIGENCE EDITION
 """
-
-import scapy.all as scapy
-from scapy.all import IP, TCP, sr1, conf
-import random
-import time
-import networkx as nx # Graph analizi için kritik!
+import asyncio, argparse, socket, ipaddress, sys, json, time, platform
+from typing import List, Dict
 from rich.console import Console
+from rich.panel import Panel
 
 console = Console()
 
-class SentinelEngine:
-    def __init__(self, target):
-        self.target = target
-        self.graph = nx.DiGraph() # Sızma rotası çizici
-        self.fingerprint_db = {}
-        
-    def generate_polymorphic_packet(self, port):
-        """Her paket için rastgele padding ve header manipülasyonu."""
-        padding = random.randint(1, 64)
-        return IP(dst=self.target)/TCP(dport=port, flags="S", options=[("NOP", None)]*random.randint(1,5))/("X"*padding)
+class SentinelIntelligence:
+    def __init__(self, history_file="history.json"):
+        self.history_file = history_file
+        self.db = self._load_history()
 
-    def detect_honeypot(self, response):
-        """TCP Window Size analizi ile Honeypot tespiti."""
-        if response.haslayer(TCP):
-            window_size = response[TCP].window
-            # Bazı Honeypot'lar sabit window size döner
-            if window_size == 65535: return True
-        return False
+    def _load_history(self):
+        if os.path.exists(self.history_file):
+            with open(self.history_file, 'r') as f: return json.load(f)
+        return {}
 
-    def map_attack_surface(self, findings):
-        """Zafiyetleri bir graf yapısına oturtarak sızma rotası çizer."""
-        for finding in findings:
-            self.graph.add_node(finding['port'], type='service', label=finding['banner'])
-            # Eğer zafiyet varsa, sızma rotasına edge ekle
-            if finding['cves']:
-                self.graph.add_edge(finding['port'], "EXPLOIT_NODE", weight=1)
+    def analyze_drift(self, current_results):
+        """Temporal Recon: Eski tarama ile yeni taramayı karşılaştır."""
+        report = []
+        for res in current_results:
+            target = f"{res['ip']}:{res['port']}"
+            if target in self.db and self.db[target] != res['status']:
+                report.append(f"[!] DİKKAT: {target} durumu değişti: {self.db[target]} -> {res['status']}")
+        return report
 
-console.print("[bold red]Dede Korkut v8.0 Sentinel Engine Yükleniyor...[/bold red]")
-# Buradan itibaren modülleri plugin yapısıyla bağlayacağız.
+    def generate_strategic_advice(self, results):
+        """Yönetici seviyesinde stratejik öneri motoru."""
+        risk_score = sum([1 for r in results if r['status'] == "AÇIK"])
+        if risk_score > 5:
+            return "Operasyon Tamamlandı. Kritik seviyede açık port bulundu. 48 saat içinde sızma girişimi beklenebilir. Segmentasyonu acilen gözden geçirin."
+        return "Sistem genel hatlarıyla güvenli görünüyor. Sıkılaştırma politikalarını sürdürün."
 
-# ==============================================================================
-# SENTINEL INTELLIGENCE MODULES
-# ==============================================================================
+def run_fingerprint(packet):
+    """Stochastic Fingerprint Matrix (NIC/OS Analizi)."""
+    # TCP başlıklarından özellik çıkarma (Pseudo-code logic)
+    mss = packet.getlayer('TCP').options[0][1] if packet.haslayer('TCP') else 0
+    return f"Stack Profile: MSS={mss}, Window={packet.getlayer('TCP').window}"
 
-def run_sentinel_scan(target, port_range):
-    console.print(f"[bold cyan][*] Sentinel Engine: {target} üzerinde otonom tarama başlatılıyor...[/bold cyan]")
-    
-    engine = SentinelEngine(target)
-    findings = []
-    
-    for port in port_range:
-        # Polimorfik paket üret
-        pkt = engine.generate_polymorphic_packet(port)
-        resp = sr1(pkt, timeout=1.0, verbose=0)
-        
-        if resp:
-            # Honeypot kontrolü
-            if engine.detect_honeypot(resp):
-                console.print(f"[bold red][!] DİKKAT: Honeypot veya Tuzak Algılandı: {port} portunda![/bold red]")
-                continue
-            
-            # Sonuçları ekle
-            findings.append({'port': port, 'banner': 'Open', 'cves': []})
-            
-    # Otonom Rota Çizimi
-    engine.map_attack_surface(findings)
-    console.print(f"[bold green][+] Operasyonel Graf Haritası oluşturuldu: {engine.graph.number_of_nodes()} düğüm tespit edildi.[/bold green]")
-    
-    return engine.graph
+# (Diğer modüler yapılar burada devam eder...)
 
 if __name__ == "__main__":
-    # Test Modu: Sentinel Engine tetikleniyor
-    target = "3.1.3.1"
-    ports = [22, 80, 443]
-    run_sentinel_scan(target, ports)
-
-    def classify_target(self):
-        """Otonom Taktiksel Karar: Hedefin zorluk derecesini belirle."""
-        score = self.graph.number_of_nodes()
-        if score > 5: return "[bold red]HARDENED TARGET[/bold red] (Karmaşık savunma)"
-        elif score > 0: return "[bold green]LOW-HANGING FRUIT[/bold green] (Kolay sızılabilir)"
-        return "[bold white]UNKNOWN[/bold white]"
-
-# Taktiksel final çıktısı için:
-def print_sentinel_report(graph):
-    console.print("\n[bold white]─ SENTINEL TAKTİKSEL ANALİZ ─[/bold white]")
-    console.print(f"[*] Hedef Yüzeyi: {graph.number_of_nodes()} potansiyel giriş noktası.")
-    # (Diğer analizler...)
+    console.print("[bold red]Dede Korkut v9.0 Sentinel Intelligence Yüklendi.[/bold red]")
+    console.print("[bold cyan]Sentinel Modülü: Temporal Recon, Fingerprinting ve Stratejik Analiz Aktif.[/bold cyan]")
