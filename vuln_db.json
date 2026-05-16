@@ -1,0 +1,47 @@
+{
+  "_metadata": {
+    "schema": "dedekorkut.vulndb.v1",
+    "updated": "2026-05-17",
+    "description": "Banner regex -> CVE eslestirme imzalari. severity: critical|high|medium|low|info"
+  },
+  "openssh": [
+    {"regex": "openssh_3\\.[0-7]",          "cve": "CVE-2006-5051", "severity": "critical", "desc": "Signal handler race condition -> RCE"},
+    {"regex": "openssh_4\\.[0-3]",          "cve": "CVE-2006-5052", "severity": "medium",   "desc": "GSSAPI authentication bypass"},
+    {"regex": "openssh_5\\.[0-2]",          "cve": "CVE-2008-5161", "severity": "medium",   "desc": "CBC plaintext recovery"},
+    {"regex": "openssh_7\\.2p2",            "cve": "CVE-2018-15473","severity": "medium",   "desc": "Username enumeration via timing"},
+    {"regex": "openssh_[78]\\.[0-5]",       "cve": "CVE-2021-28041","severity": "high",     "desc": "ssh-agent double-free"},
+    {"regex": "openssh_9\\.[0-7]p1",        "cve": "CVE-2024-6387", "severity": "critical", "desc": "regreSSHion - signal handler RCE"}
+  ],
+  "apache": [
+    {"regex": "apache/2\\.4\\.(4[0-9]|49)", "cve": "CVE-2021-41773","severity": "critical", "desc": "Path traversal + RCE"},
+    {"regex": "apache/2\\.4\\.50",          "cve": "CVE-2021-42013","severity": "critical", "desc": "Path traversal bypass of 41773 fix"},
+    {"regex": "apache/2\\.2\\.",            "cve": "EOL-APACHE-2.2","severity": "high",     "desc": "End-of-Life - aktif vuln bulundurur"},
+    {"regex": "apache/2\\.4\\.[0-9]+",      "cve": "GENERIC-2.4.x", "severity": "info",     "desc": "Versiyon-spesifik kontrol gerekli"}
+  ],
+  "nginx": [
+    {"regex": "nginx/1\\.([0-9]|1[0-7])\\.","cve": "CVE-2019-9511", "severity": "high",     "desc": "HTTP/2 DoS - multiple"},
+    {"regex": "nginx/1\\.20\\.0",           "cve": "CVE-2021-23017","severity": "critical", "desc": "DNS resolver off-by-one -> RCE"}
+  ],
+  "vsftpd": [
+    {"regex": "vsftpd_2\\.3\\.4",           "cve": "BACKDOOR-2011", "severity": "critical", "desc": "Trojan backdoor :) smiley payload"}
+  ],
+  "proftpd": [
+    {"regex": "proftpd_1\\.3\\.5[^0-9]?",   "cve": "CVE-2015-3306", "severity": "critical", "desc": "mod_copy unauthenticated RCE"}
+  ],
+  "microsoft-iis": [
+    {"regex": "microsoft-iis/6\\.",         "cve": "CVE-2017-7269", "severity": "critical", "desc": "WebDAV ScStoragePathFromUrl buffer overflow"},
+    {"regex": "microsoft-iis/7\\.[05]",     "cve": "GENERIC-IIS-7", "severity": "medium",   "desc": "EOL - bilinen birden fazla vuln"}
+  ],
+  "smb": [
+    {"regex": "windows[_ ]?(7|server[_ ]?2008|xp|2003)", "cve": "MS17-010 / EternalBlue", "severity": "critical", "desc": "SMBv1 RCE - WannaCry vektoru"},
+    {"regex": "samba_3\\.",                 "cve": "CVE-2017-7494", "severity": "critical", "desc": "SambaCry - is_known_pipename RCE"}
+  ],
+  "exim": [
+    {"regex": "exim_4\\.(8[0-9]|9[0-1])",   "cve": "CVE-2019-10149","severity": "critical", "desc": "Return of the WIZard - RCE"}
+  ],
+  "tls": [
+    {"regex": "tls.?1\\.0|sslv3|sslv2",     "cve": "WEAK-TLS",      "severity": "high",     "desc": "Eski TLS/SSL surumu - POODLE/BEAST"},
+    {"regex": "self.signed",                "cve": "WEAK-CERT",     "severity": "medium",   "desc": "Self-signed sertifika - MITM riski"},
+    {"regex": "expired",                    "cve": "EXPIRED-CERT",  "severity": "medium",   "desc": "Sertifika suresi dolmus"}
+  ]
+}
