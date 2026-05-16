@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Dede Korkut - Gelişmiş Ağ Tarama ve İstihbarat Aracı (Pro Sürüm)
+Dede Korkut - Gelişmiş Ağ Tarama ve İstihbarat Aracı (Pro V3)
 Passive Sniffing, OSINT, Deep Protocol Autopsy & CVE Mapping Architecture
 """
 
@@ -17,6 +17,7 @@ import platform
 import time
 import random
 import urllib.request
+import re
 from datetime import datetime
 from typing import List, Dict, Tuple, Optional
 import concurrent.futures
@@ -41,17 +42,36 @@ except ImportError:
 console = Console()
 
 BANNER = r"""[bold red]
-    ____           __        __ __           __        __ 
-   / __ \___  ____/ /__     / //_/___  _____/ /____  / /_
-  / / / / _ \/ __  / _ \   / ,< / __ \/ ___/ //_/ / / / __/
- / /_/ /  __/ /_/ /  __/  / /| / /_/ / /  / ,< / /_/ / /_  
-/_____/\___/\__,_/\___/  /_/ |_\____/_/  /_/|_|\__,_/\__/  
+    ____           __        __ __           __        __ 
+   / __ \___  ____/ /__     / //_/___  _____/ /____  / /_
+  / / / / _ \/ __  / _ \   / ,< / __ \/ ___/ //_/ / / / __/
+ / /_/ /  __/ /_/ /  __/  / /| / /_/ / /  / ,< / /_/ / /_  
+/_____/\___/\__,_/\___/  /_/ |_\____/_/  /_/|_|\__,_/\__/  
 [/bold red][bold cyan]
-> Operasyonel Ağ Tarama ve İstihbarat Platformu [Pro]
+> Operasyonel Ağ Tarama ve İstihbarat Platformu [Pro V3]
 > Entegrasyonlar: Passive Sniffing, OSINT Metadata, Safe Deep Probing, CVE Mapping
 [/bold cyan]"""
 
 packets_sent = 0
+
+# Dahili Statik Zafiyet İmzaları Veritabanı (Regex Destekli)
+VULNERABILITY_DB = {
+    "openssh": [
+        {"regex": r"openssh_3\.[0-7]", "cve": "CVE-2006-5051 (Uzaktan Kod Çalıştırma / Kritik)"},
+        {"regex": r"openssh_7\.2p2", "cve": "CVE-2018-15473 (Kullanıcı Adı Numaralandırma / Orta)"},
+        {"regex": r"openssh_8\.[0-5]", "cve": "CVE-2021-28041 (Buffer Overflow / Yüksek)"}
+    ],
+    "apache": [
+        {"regex": r"apache/2\.4\.41", "cve": "CVE-2020-1927 (Mod_rewrite Bypass / Orta)"},
+        {"regex": r"apache/2\.4\.[0-9]{2}", "cve": "Genel Apache 2.4.x Bilinen Sızıntı Riskleri"}
+    ],
+    "vsftpd": [
+        {"regex": r"vsftpd_2\.3\.4", "cve": "vsftpd 2.3.4 Backdoor Zararlı Yazılım İmzası! (Kritik)"}
+    ],
+    "smb": [
+        {"regex": r"windows_7|windows_server_2008", "cve": "MS17-010 (EternalBlue Potansiyeli / Kritik)"}
+    ]
+}
 
 # ==============================================================================
 # FAZ 1: GHOST PROTOCOL - PASİF AĞ DİNLEME
@@ -61,12 +81,12 @@ def packet_callback(pkt):
     if pkt.haslayer(IP):
         src_ip = pkt[IP].src
         dst_ip = pkt[IP].dst
-        proto = "Bilinmiyor"
+        proto = "UNK"
         info = ""
         
         if pkt.haslayer(TCP):
             proto = "TCP"
-            info = f"Port: {pkt[TCP].sport} -> {pkt[TCP].dport}"
+            info = f"Port: {pkt[TCP].sport} -> {pkt[TCP].dport} [Flags: {pkt[TCP].flags}]"
         elif pkt.haslayer(UDP):
             proto = "UDP"
             info = f"Port: {pkt[UDP].sport} -> {pkt[UDP].dport}"
@@ -76,17 +96,20 @@ def packet_callback(pkt):
 def run_passive_sniff(interface: Optional[str] = None, timeout: int = 30):
     """Sıfır etkileşim ile ağ kartını dinleme moduna alır."""
     if not SCAPY_AVAILABLE:
-        console.print("[bold red][!] Pasif koklama için 'scapy' gereklidir.[/bold red]")
+        console.print("[bold red][!] Pasif koklama için 'scapy' modülü yüklenmelidir.[/bold red]")
         return
-    if os.geteuid() != 0 if platform.system() != "Windows" else False:
-        console.print("[bold red][!] Pasif mod için yetkili kullanıcı (Root/Admin) olmanız gerekir.[/bold red]")
+    if os.name != 'nt' and os.geteuid() != 0:
+        console.print("[bold red][!] Pasif dinleme modu yüksek yetki (sudo) gerektirir.[/bold red]")
         return
         
-    console.print(f"[bold magenta][*] Ghost Protocol Aktif. Ağ kartı dinleniyor ({timeout}sn)...[/bold magenta]")
-    sniff(iface=interface, prn=packet_callback, timeout=timeout)
+    console.print(f"[bold magenta][*] Ghost Protocol Devrede. Ağ dinleniyor (Arayüz: {interface or 'Varsayılan'}, Süre: {timeout}sn)...[/bold magenta]")
+    try:
+        sniff(iface=interface, prn=packet_callback, timeout=timeout, store=0)
+    except Exception as e:
+        console.print(f"[bold red][!] Dinleme modunda hata oluştu: {e}[/bold red]")
 
 # ==============================================================================
-# FAZ 1: OSINT / SHODAN ENTEGRASYONU (HEDEFE DOKUNMADAN İSTİHBARAT)
+# FAZ 1: OSINT / SHODAN ENTEGRASYONU
 # ==============================================================================
 def fetch_shodan_osint(target_ip: str, api_key: str) -> Optional[Dict]:
     """Hedefe dokunmadan Shodan API üzerinden geçmiş port ve zafiyet verilerini çeker."""
@@ -94,10 +117,15 @@ def fetch_shodan_osint(target_ip: str, api_key: str) -> Optional[Dict]:
         return None
     url = f"https://api.shodan.io/shodan/host/{target_ip}?key={api_key}"
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'DedeKorkut-Pro'})
-        with urllib.request.urlopen(req, timeout=5) as response:
+        req = urllib.request.Request(url, headers={'User-Agent': 'DedeKorkut-ProV3'})
+        with urllib.request.urlopen(req, timeout=6) as response:
             if response.status == 200:
                 return json.loads(response.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            console.print(f"[bold yellow][!] Shodan üzerinde {target_ip} için kayıt bulunamadı.[/bold yellow]")
+        else:
+            console.print(f"[bold red][!] Shodan API Hatası: HTTP {e.code}[/bold red]")
     except Exception:
         pass
     return None
@@ -122,28 +150,24 @@ def safe_rdp_probe(ip: str, timeout: float) -> str:
         resp = s.recv(1024)
         s.close()
         if resp:
-            return "RDP Hizmeti Aktif (Güvenli SSL/TLS Katmanı Mevcut)"
+            return "RDP (Windows Terminal Services - TLS/NLA Katmanı Aktif)"
     except Exception:
         pass
-    return "RDP Hizmeti (Açık)"
+    return "RDP Hizmeti Açık"
 
 # ==============================================================================
-# FAZ 4: VULNERABILITY CORTEX - YEREL CVE EŞLEŞTİRME MOTORU
+# FAZ 4: VULNERABILITY CORTEX - DİNAMİK REGEX MOTORU
 # ==============================================================================
 def check_cve_mapping(banner: str) -> List[str]:
-    """Banner bilgisini bilinen yaygın zafiyet şablonlarıyla güvenli bir şekilde eşleştirir."""
+    """Banner verilerini imza veritabanındaki regex kalıplarıyla dinamik olarak eşleştirir."""
     vulns = []
-    normalized = banner.lower()
+    normalized_banner = banner.lower().replace(" ", "_")
     
-    if "openssh 7.2p2" in normalized:
-        vulns.append("[!] CVE-2018-15473 (Username Enumeration) - Zafiyet Potansiyeli Yüksek!")
-    elif "apache/2.4.41" in normalized:
-        vulns.append("[!] CVE-2020-1927 (Mod_rewrite Bypass) - Güncelleme Önerilir.")
-    elif "vsftpd 2.3.4" in normalized:
-        vulns.append("[!] VSFTPD 2.3.4 Backdoor İmzası Algılandı! - Kritik Risk.")
-    elif "smb" in normalized.lower() and "windows 7" in normalized:
-        vulns.append("[!] MS17-010 (EternalBlue) Potansiyeli - Yama Durumunu Kontrol Edin.")
-        
+    for category, rules in VULNERABILITY_DB.items():
+        for rule in rules:
+            if re.search(rule["regex"], normalized_banner):
+                vulns.append(f"[bold red][!][/bold red] {rule['cve']}")
+                
     return vulns
 
 # ==============================================================================
@@ -158,11 +182,15 @@ async def grab_banner_advanced(reader: asyncio.StreamReader, writer: asyncio.Str
         elif port == 3389:
             banner = safe_rdp_probe(ip, timeout)
         else:
-            writer.write(b"HEAD / HTTP/1.1\r\nHost: target\r\n\r\n")
+            if port in [80, 8080, 443]:
+                writer.write(b"HEAD / HTTP/1.1\r\nHost: target\r\nUser-Agent: DedeKorkut\r\n\r\n")
+            else:
+                writer.write(b"\r\n")
             await writer.drain()
             data = await asyncio.wait_for(reader.read(256), timeout=timeout)
             if data:
                 banner = data.decode('utf-8', errors='ignore').strip().split('\n')[0].replace('\r', '')
+                if len(banner) > 60: banner = banner[:57] + "..."
                 
         cve_list = check_cve_mapping(banner)
     except Exception:
@@ -173,7 +201,7 @@ async def grab_banner_advanced(reader: asyncio.StreamReader, writer: asyncio.Str
         except Exception: pass
     return banner, cve_list
 
-async def async_scan_port(sem: asyncio.Semaphore, ip: str, port: int, timeout: float) -> Optional[Dict]:
+async def async_scan_port(sem: asyncio.Semaphore, ip: str, port: int, timeout: float, progress, task_id) -> Optional[Dict]:
     global packets_sent
     async with sem:
         packets_sent += 1
@@ -181,22 +209,62 @@ async def async_scan_port(sem: asyncio.Semaphore, ip: str, port: int, timeout: f
             conn = asyncio.open_connection(ip, port)
             reader, writer = await asyncio.wait_for(conn, timeout=timeout)
             banner, cves = await grab_banner_advanced(reader, writer, port, ip, timeout)
+            progress.update(task_id, advance=1)
             return {"ip": ip, "port": port, "status": "AÇIK", "banner": banner, "cves": cves}
         except Exception:
+            progress.update(task_id, advance=1)
             return None
 
 async def run_async_scan(targets: List[str], ports: List[int], timeout: float, max_concurrent: int) -> List[Dict]:
     sem = asyncio.Semaphore(max_concurrent)
-    tasks = []
     results = []
-    for ip in targets:
-        for port in ports: 
-            tasks.append(async_scan_port(sem, ip, port, timeout))
-    for coro in asyncio.as_completed(tasks):
-        res = await coro
-        if res: results.append(res)
+    total_tasks = len(targets) * len(ports)
+    
+    with Progress(
+        SpinnerColumn(spinner_name="dots2", style="cyan"),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(style="red", complete_style="green"),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TextColumn("•"), TextColumn("[bold cyan]Süre:[/bold cyan] {task.elapsed:.1f}s")
+    ) as progress:
+        task_id = progress.add_task("[bold yellow]Ağ Taraması Gerçekleştiriliyor...", total=total_tasks)
+        tasks = [async_scan_port(sem, ip, port, timeout, progress, task_id) for ip in targets for port in ports]
+        
+        for coro in asyncio.as_completed(tasks):
+            res = await coro
+            if res: results.append(res)
     return results
 
+# ==============================================================================
+# HEDEF KÜMESİ AYRIŞTIRMA VE ÇÖZÜMLEME
+# ==============================================================================
+def parse_target_network(target_str: str) -> List[str]:
+    """Domain isimlerini, tekil IP'leri veya CIDR bloklarını ayrıştırıp IP listesi döner."""
+    targets = []
+    target_str = target_str.strip()
+    
+    if '/' in target_str:
+        try:
+            network = ipaddress.ip_network(target_str, strict=False)
+            return [str(ip) for ip in network.hosts()]
+        except ValueError: pass
+            
+    try:
+        ipaddress.ip_address(target_str)
+        return [target_str]
+    except ValueError: pass
+        
+    try:
+        ip = socket.gethostbyname(target_str)
+        console.print(f"[bold cyan][*] Domain Çözümlendi:[/bold cyan] {target_str} ──> [bold white]{ip}[/bold white]")
+        return [ip]
+    except socket.gaierror:
+        console.print(f"[bold red][!] Hedef çözümlenemedi veya geçersiz format: {target_str}[/bold red]")
+        sys.exit(1)
+
+# ==============================================================================
+# ANA ÇALIŞTIRICI
+# ==============================================================================
 def main():
     parser = argparse.ArgumentParser(description="Dede Korkut Pro - Gelişmiş Ağ Tarama ve İstihbarat Platformu")
     parser.add_argument("-t", "--target", help="Hedef IP veya CIDR")
@@ -207,7 +275,7 @@ def main():
     parser.add_argument("-c", "--concurrency", type=int, default=200, help="Eşzamanlı bağlantı sınırı")
     
     args = parser.parse_args()
-    console.print(Panel(BANNER, style="bold red"))
+    console.print(Panel(BANNER, border_style="red"))
     
     if args.passive:
         run_passive_sniff(timeout=30)
@@ -222,9 +290,13 @@ def main():
         osint_data = fetch_shodan_osint(args.target, args.shodan_key)
         if osint_data:
             console.print(f"[bold green][+] Geçmiş Port Verileri Bulundu:[/bold green] {osint_data.get('ports', [])}")
-    
-    targets = [args.target]
-    ports = [int(p) for p in args.ports.split(',')]
+            if 'vulns' in osint_data:
+                console.print(f"[bold red][!] Bilinen Eski Zafiyetler:[/bold red] {osint_data['vulns']}")
+        else:
+            console.print("[bold yellow][!] Shodan üzerinde temiz veya kayıt dışı veri.[/bold yellow]")
+
+    targets = parse_target_network(args.target)
+    ports = [int(p.strip()) for p in args.ports.split(',')]
     
     console.print(f"\n[bold cyan][*] Aktif Tarama ve Derin Otopsi Başlatılıyor...[/bold cyan]")
     start_time = time.time()
@@ -238,7 +310,7 @@ def main():
     table.add_column("Zafiyet Cortex Analizi (CVE)", style="yellow")
     
     for r in results:
-        cve_str = "\n".join(r['cves']) if r['cves'] else "Temiz"
+        cve_str = "\n".join(r['cves']) if r['cves'] else "Temiz / Eşleşme Yok"
         table.add_row(r['ip'], str(r['port']), r['banner'], cve_str)
         
     console.print(table)
@@ -246,4 +318,6 @@ def main():
 
 if __name__ == "__main__":
     try: main()
-    except KeyboardInterrupt: sys.exit(0)
+    except KeyboardInterrupt:
+        console.print("\n[bold red][!] Operasyon kullanıcı komutuyla kesildi.[/bold red]")
+        sys.exit(0)
