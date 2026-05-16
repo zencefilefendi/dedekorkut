@@ -1,120 +1,93 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 """
-Dede Korkut - Gelişmiş Ağ İstihbarat Platformu
-v7.0 ORCHESTRATOR - Plugin tabanlı modüler mimari
+Dede Korkut v8.0 - SENTINEL EDITION
+Engine: Tactical Otonom Ajan
 """
 
-import asyncio
-import argparse
-import socket
-import ipaddress
-import sys
-import json
+import scapy.all as scapy
+from scapy.all import IP, TCP, sr1, conf
+import random
 import time
-import http.client
-from abc import ABC, abstractmethod
-from typing import List, Dict, Tuple, Optional
+import networkx as nx # Graph analizi için kritik!
 from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
 
 console = Console()
 
-# ==============================================================================
-# ORCHESTRATOR MİMARİSİ (Plugin Pattern)
-# ==============================================================================
-class ScannerPlugin(ABC):
-    @abstractmethod
-    async def run(self, ip: str, port: int) -> Dict:
-        pass
+class SentinelEngine:
+    def __init__(self, target):
+        self.target = target
+        self.graph = nx.DiGraph() # Sızma rotası çizici
+        self.fingerprint_db = {}
+        
+    def generate_polymorphic_packet(self, port):
+        """Her paket için rastgele padding ve header manipülasyonu."""
+        padding = random.randint(1, 64)
+        return IP(dst=self.target)/TCP(dport=port, flags="S", options=[("NOP", None)]*random.randint(1,5))/("X"*padding)
 
-class WebIntelligencePlugin(ScannerPlugin):
-    async def run(self, ip: str, port: int) -> Dict:
-        if port not in [80, 443, 8080]: return {"leaks": []}
-        found = []
-        paths = ["/.env", "/.git/config", "/admin", "/backup.sql"]
-        for path in paths:
-            try:
-                conn = http.client.HTTPConnection(ip, port, timeout=1.0)
-                conn.request("HEAD", path)
-                if conn.getresponse().status in [200, 403]: found.append(path)
-                conn.close()
-            except: pass
-        return {"leaks": found}
+    def detect_honeypot(self, response):
+        """TCP Window Size analizi ile Honeypot tespiti."""
+        if response.haslayer(TCP):
+            window_size = response[TCP].window
+            # Bazı Honeypot'lar sabit window size döner
+            if window_size == 65535: return True
+        return False
 
-class VulnerabilityPlugin(ScannerPlugin):
-    DB = {
-        "vsftpd 2.3.4": "CVE-2011-2523 (Backdoor)",
-        "OpenSSH 7.2p2": "CVE-2018-15473 (User Enum)",
-        "Apache 2.4.49": "CVE-2021-41773 (RCE)"
-    }
-    async def run(self, ip: str, port: int) -> Dict:
-        # Basitleştirilmiş banner analizi
-        return {"cves": ["Generic Analysis Active"], "risk": 5}
+    def map_attack_surface(self, findings):
+        """Zafiyetleri bir graf yapısına oturtarak sızma rotası çizer."""
+        for finding in findings:
+            self.graph.add_node(finding['port'], type='service', label=finding['banner'])
+            # Eğer zafiyet varsa, sızma rotasına edge ekle
+            if finding['cves']:
+                self.graph.add_edge(finding['port'], "EXPLOIT_NODE", weight=1)
+
+console.print("[bold red]Dede Korkut v8.0 Sentinel Engine Yükleniyor...[/bold red]")
+# Buradan itibaren modülleri plugin yapısıyla bağlayacağız.
 
 # ==============================================================================
-# CORE ENGINE
+# SENTINEL INTELLIGENCE MODULES
 # ==============================================================================
-class DedeKorkutOrchestrator:
-    def __init__(self, target: str, ports: List[int]):
-        self.targets = self._parse_targets(target)
-        self.ports = ports
-        self.plugins = [WebIntelligencePlugin(), VulnerabilityPlugin()]
 
-    def _parse_targets(self, ts):
-        try:
-            n = ipaddress.ip_network(ts, strict=False)
-            return [str(ip) for ip in n.hosts()] if n.prefixlen < 32 else [str(n.network_address)]
-        except: return []
-
-    async def _scan_port(self, ip: str, port: int):
-        try:
-            conn = asyncio.open_connection(ip, port)
-            reader, writer = await asyncio.wait_for(conn, timeout=2.0)
-            writer.close()
-            await writer.wait_closed()
+def run_sentinel_scan(target, port_range):
+    console.print(f"[bold cyan][*] Sentinel Engine: {target} üzerinde otonom tarama başlatılıyor...[/bold cyan]")
+    
+    engine = SentinelEngine(target)
+    findings = []
+    
+    for port in port_range:
+        # Polimorfik paket üret
+        pkt = engine.generate_polymorphic_packet(port)
+        resp = sr1(pkt, timeout=1.0, verbose=0)
+        
+        if resp:
+            # Honeypot kontrolü
+            if engine.detect_honeypot(resp):
+                console.print(f"[bold red][!] DİKKAT: Honeypot veya Tuzak Algılandı: {port} portunda![/bold red]")
+                continue
             
-            # Tüm pluginleri tetikle
-            results = {"ip": ip, "port": port, "plugins": {}}
-            for plugin in self.plugins:
-                results["plugins"][plugin.__class__.__name__] = await plugin.run(ip, port)
-            return results
-        except: return None
-
-    async def execute(self):
-        tasks = [self._scan_port(ip, port) for ip in self.targets for port in self.ports]
-        return [r for r in await asyncio.gather(*tasks) if r]
-
-# ==============================================================================
-# CLI & REPORTING
-# ==============================================================================
-def main():
-    parser = argparse.ArgumentParser(description="Dede Korkut v7.0 - Orchestrator Edition")
-    parser.add_argument("-t", "--target", required=True)
-    parser.add_argument("-p", "--ports", default="80,443,445")
-    args = parser.parse_args()
-
-    console.print(Panel("[bold red]Dede Korkut v7.0: Plugin tabanlı keşif başlatıldı...[/bold red]"))
+            # Sonuçları ekle
+            findings.append({'port': port, 'banner': 'Open', 'cves': []})
+            
+    # Otonom Rota Çizimi
+    engine.map_attack_surface(findings)
+    console.print(f"[bold green][+] Operasyonel Graf Haritası oluşturuldu: {engine.graph.number_of_nodes()} düğüm tespit edildi.[/bold green]")
     
-    ports = [int(p) for p in args.ports.split(',')]
-    orchestrator = DedeKorkutOrchestrator(args.target, ports)
-    
-    start = time.time()
-    data = asyncio.run(orchestrator.execute())
-    
-    table = Table(title="Operasyonel İstihbarat Raporu")
-    table.add_column("IP", style="cyan")
-    table.add_column("Port", style="yellow")
-    table.add_column("Analiz Bulguları", style="magenta")
-    
-    for entry in data:
-        details = str(entry["plugins"])
-        table.add_row(entry["ip"], str(entry["port"]), details)
-    
-    console.print(table)
-    console.print(f"\n[bold green]İşlem tamamlandı ({time.time()-start:.2f} saniye).[/bold green]")
+    return engine.graph
 
 if __name__ == "__main__":
-    main()
+    # Test Modu: Sentinel Engine tetikleniyor
+    target = "3.1.3.1"
+    ports = [22, 80, 443]
+    run_sentinel_scan(target, ports)
+
+    def classify_target(self):
+        """Otonom Taktiksel Karar: Hedefin zorluk derecesini belirle."""
+        score = self.graph.number_of_nodes()
+        if score > 5: return "[bold red]HARDENED TARGET[/bold red] (Karmaşık savunma)"
+        elif score > 0: return "[bold green]LOW-HANGING FRUIT[/bold green] (Kolay sızılabilir)"
+        return "[bold white]UNKNOWN[/bold white]"
+
+# Taktiksel final çıktısı için:
+def print_sentinel_report(graph):
+    console.print("\n[bold white]─ SENTINEL TAKTİKSEL ANALİZ ─[/bold white]")
+    console.print(f"[*] Hedef Yüzeyi: {graph.number_of_nodes()} potansiyel giriş noktası.")
+    # (Diğer analizler...)
