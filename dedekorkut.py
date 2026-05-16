@@ -2,19 +2,35 @@
 # -*- coding: utf-8 -*-
 
 """
-Dede Korkut - Gelişmiş Ağ İstihbarat Platformu (Pro Sürüm)
-v10.0 TOTAL INTELLIGENCE - Temporal Recon, Fingerprinting & Strategic Reporting
+Dede Korkut - Gelişmiş Ağ İstihbarat Platformu (Pro Sürüm v10.0)
+Architecture: Orchestrator Engine, Plugin System, Sentinel Intelligence Core
 """
 
-import asyncio, argparse, socket, ipaddress, sys, json, os, platform, time, random, http.client
-from datetime import datetime
+import asyncio, argparse, socket, ipaddress, sys, json, os, platform, time, random, http.client, concurrent.futures, logging
+from abc import ABC, abstractmethod
 from typing import List, Dict, Tuple, Optional
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from scapy.all import IP, TCP, sr1, conf
+from datetime import datetime
+import networkx as nx
+
+# Rich UI
+try:
+    from rich.console import Console
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn
+except ImportError:
+    print("[!] Gerekli kütüphane eksik: 'rich'. (pip install rich)"); sys.exit(1)
+
+# Scapy Imports
+try:
+    logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+    from scapy.all import IP, TCP, UDP, ICMP, ARP, Ether, sniff, conf, sr1
+    SCAPY_AVAILABLE = True
+except ImportError:
+    SCAPY_AVAILABLE = False
 
 console = Console()
+
 BANNER = r"""[bold red]
     ____           __        __ __           __        __ 
    / __ \___  ____/ /__     / //_/___  _____/ /____  / /_
@@ -22,97 +38,116 @@ BANNER = r"""[bold red]
  / /_/ /  __/ /_/ /  __/  / /| / /_/ / /  / ,< / /_/ / /_  
 /_____/\___/\__,_/\___/  /_/ |_\____/_/  /_/|_|\__,_/\__/  
 [/bold red][bold cyan]
-> v10.0 TOTAL INTELLIGENCE: Temporal Recon, Stochastic Fingerprint & Strategic Reporting
+> v10.0 SENTINEL CORE: Orchestrator, Plugin System, Attack Surface Mapping
 [/bold cyan]"""
 
 # ==============================================================================
-# v10.0 INTELLIGENCE CORE
+# SENTINEL INTELLIGENCE CORE
 # ==============================================================================
-class IntelligenceCore:
-    def __init__(self, history_file="history.json"):
-        self.history_file = history_file
-        self.history = self._load_history()
+class SentinelEngine:
+    def __init__(self, target):
+        self.target = target
+        self.graph = nx.DiGraph()
 
-    def _load_history(self):
-        if os.path.exists(self.history_file):
-            with open(self.history_file, 'r') as f: return json.load(f)
-        return {}
+    def map_attack_surface(self, findings):
+        for f in findings:
+            self.graph.add_node(f['ip'], type='host')
+            self.graph.add_node(f"{f['ip']}:{f['port']}", type='service', banner=f['banner'])
+            self.graph.add_edge(f['ip'], f"{f['ip']}:{f['port']}")
+        console.print(f"[bold green][+] Saldırı Yüzeyi Haritası: {self.graph.number_of_nodes()} düğüm.[/bold green]")
 
-    def save_results(self, results):
-        new_history = {f"{r['ip']}:{r['port']}": r['status'] for r in results}
-        with open(self.history_file, 'w') as f: json.dump(new_history, f)
-
-    def analyze_drift(self, current_results):
-        drift = []
-        for res in current_results:
-            key = f"{res['ip']}:{res['port']}"
-            if key in self.history and self.history[key] != res['status']:
-                drift.append(f"[*] Drift Tespit Edildi: {key} ({self.history[key]} -> {res['status']})")
-        return drift
-
-    def get_strategic_report(self, results):
-        open_ports = len([r for r in results if r['status'] == 'AÇIK'])
-        if open_ports > 3:
-            return "Kritik operasyonel durum! Ağ üzerinde çok sayıda açık servis tespit edildi. Sızma riskini minimize etmek için segmentasyonu gözden geçirin."
-        return "Sistem güvenliği standartlara uygun. Düzenli izlemeye devam edilmeli."
-
-def stochastic_fingerprint(ip: str, port: int) -> str:
-    """Stochastic TCP Stack Fingerprinting."""
-    pkt = IP(dst=ip)/TCP(dport=port, flags="S")
-    resp = sr1(pkt, timeout=1.0, verbose=0)
-    if resp and resp.haslayer(TCP):
-        tcp = resp.getlayer(TCP)
-        # Pencere boyutu, MSS ve SACK özellikleri bir imza oluşturur
-        return f"Stack Signature: [Window:{tcp.window}, MSS:{tcp.options[0][1] if tcp.options else 'N/A'}]"
-    return "Fingerprint alınamadı."
+    def stochastic_fingerprint(self, ip: str, port: int) -> str:
+        if not SCAPY_AVAILABLE: return "N/A"
+        try:
+            pkt = IP(dst=ip)/TCP(dport=port, flags="S")
+            resp = sr1(pkt, timeout=0.5, verbose=0)
+            if resp and resp.haslayer(TCP):
+                return f"Window:{resp[TCP].window}, MSS:{resp[TCP].options[0][1] if resp[TCP].options else 'N/A'}"
+        except: pass
+        return "N/A"
 
 # ==============================================================================
-# SCANNER ENGINE
+# PLUGIN SYSTEM
 # ==============================================================================
-async def scan_port(ip: str, port: int, timeout: float) -> Dict:
-    try:
-        conn = asyncio.open_connection(ip, port)
-        reader, writer = await asyncio.wait_for(conn, timeout=timeout)
-        writer.close(); await writer.wait_closed()
-        return {"ip": ip, "port": port, "status": "AÇIK", "fingerprint": stochastic_fingerprint(ip, port)}
-    except:
-        return {"ip": ip, "port": port, "status": "KAPALI", "fingerprint": "N/A"}
+class ScannerPlugin(ABC):
+    @abstractmethod
+    async def run(self, ip: str, port: int) -> Dict: pass
 
-async def run_intelligence_scan(targets, ports, timeout):
-    tasks = [scan_port(ip, port, timeout) for ip in targets for port in ports]
-    return await asyncio.gather(*tasks)
+class WebIntelligencePlugin(ScannerPlugin):
+    async def run(self, ip: str, port: int) -> Dict:
+        if port not in [80, 443, 8080]: return {"leaks": []}
+        found = []
+        for path in ["/.env", "/.git/config", "/admin", "/config.php"]:
+            try:
+                conn = http.client.HTTPConnection(ip, port, timeout=0.8)
+                conn.request("HEAD", path)
+                if conn.getresponse().status in [200, 403]: found.append(path)
+            except: pass
+        return {"leaks": found}
+
+class SMBAutopsyPlugin(ScannerPlugin):
+    async def run(self, ip: str, port: int) -> Dict:
+        if port != 445: return {"details": "N/A"}
+        return {"details": "SMB v2/v3 Detectable - Windows/Samba"}
 
 # ==============================================================================
-# MAIN
+# CORE ORCHESTRATOR
+# ==============================================================================
+class DedeKorkutOrchestrator:
+    def __init__(self, target, ports):
+        self.targets = self._parse_targets(target)
+        self.ports = ports
+        self.plugins = [WebIntelligencePlugin(), SMBAutopsyPlugin()]
+        self.sentinel = SentinelEngine(target)
+
+    def _parse_targets(self, ts):
+        try:
+            n = ipaddress.ip_network(ts, strict=False)
+            return [str(ip) for ip in n.hosts()] if n.prefixlen < 32 else [str(n.network_address)]
+        except: return []
+
+    async def _scan_port(self, ip: str, port: int):
+        try:
+            conn = asyncio.open_connection(ip, port)
+            reader, writer = await asyncio.wait_for(conn, timeout=1.5)
+            writer.close(); await writer.wait_closed()
+            
+            res = {"ip": ip, "port": port, "status": "AÇIK", "banner": "N/A", "plugins": {}}
+            for p in self.plugins: res["plugins"][p.__class__.__name__] = await p.run(ip, port)
+            res["fingerprint"] = self.sentinel.stochastic_fingerprint(ip, port)
+            return res
+        except: return None
+
+    async def execute(self):
+        tasks = [self._scan_port(ip, port) for ip in self.targets for port in self.ports]
+        data = [r for r in await asyncio.gather(*tasks) if r]
+        self.sentinel.map_attack_surface(data)
+        return data
+
+# ==============================================================================
+# MAIN ENGINE
 # ==============================================================================
 def main():
-    parser = argparse.ArgumentParser(description="Dede Korkut v10.0 Sentinel")
+    parser = argparse.ArgumentParser(description="Dede Korkut v10.0 Sentinel - Total Intelligence")
     parser.add_argument("-t", "--target", required=True)
+    parser.add_argument("-p", "--ports", default="21,22,80,443,445")
     args = parser.parse_args()
     
     console.print(Panel(BANNER, style="bold red"))
-    engine = IntelligenceCore()
     
-    # Tarama
-    results = asyncio.run(run_intelligence_scan([args.target], [22, 80, 443], 1.5))
-    
-    # Analiz
-    drift = engine.analyze_drift(results)
-    advice = engine.generate_strategic_advice(results)
+    orch = DedeKorkutOrchestrator(args.target, [int(p) for p in args.ports.split(',')])
+    data = asyncio.run(orch.execute())
     
     # Raporlama
-    if drift:
-        for d in drift: console.print(d, style="bold yellow")
+    table = Table(title="Dede Korkut v10.0 Analiz Raporu")
+    table.add_column("IP", style="cyan")
+    table.add_column("Port", style="yellow")
+    table.add_column("Fingerprint", style="magenta")
+    table.add_column("Plugin Bulguları", style="white")
     
-    console.print(Panel(advice, title="Stratejik İstihbarat Özeti", style="green"))
-    
-    table = Table(title="v10.0 Sentinel Analiz Raporu")
-    table.add_column("IP"); table.add_column("Port"); table.add_column("Donanım İmzası")
-    for r in results:
-        table.add_row(r['ip'], str(r['port']), r['fingerprint'])
+    for e in data:
+        table.add_row(e["ip"], str(e["port"]), e["fingerprint"], str(e["plugins"]))
     console.print(table)
-    
-    engine.save_results(results)
 
 if __name__ == "__main__":
     try: main()
